@@ -182,6 +182,5 @@ async def controleur_vision():
     webcam.release()
     cv2.destroyAllWindows()
 
-
 if __name__ == "__main__":
     asyncio.run(controleur_vision())

@@ -48,9 +48,7 @@ def analyser_image(image) -> str | None:
     masque = cv2.dilate(masque, None, iterations=2)
 
     # --- AFFICHAGE DU MASQUE (L'écran noir de debug) ---
-    # Si cette fenêtre est trop sombre, baisse VERT_MIN. 
-    # Si elle a trop de taches blanches, augmente TAILLE_MIN.
-    cv2.imshow("Masque vert (Debug)", masque)
+    cv2.imshow("Masque vert", masque)
 
     # Trouve les contours de l'objet
     contours, _ = cv2.findContours(masque, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -82,17 +80,17 @@ def analyser_image(image) -> str | None:
     cv2.drawContours(image, [plus_grand], -1, (0, 255, 0), 2)
     cv2.circle(image, (cx, cy), 8, (0, 255, 0), -1)
 
-    # --- LOGIQUE DES COMMANDES (Priorités) ---
     
-    # 1. Priorité : objet en bas → ENTER
+    # ── LOGIQUE DES COMMANDES (Priorités)  ──────────────────────
+    # Priorité 1: objet en bas → ENTER
     if y > SEUIL_ENTER:
         return "ENTER"
 
-    # 2. Priorité : objet en haut → FIRE
+    # Priorité 2 : objet en haut → FIRE
     if y < SEUIL_TIR:
         return "FIRE"
 
-    # 3. Priorité : position horizontale → LEFT ou RIGHT
+    # Priorité 3 : position horizontale → LEFT ou RIGHT
     if x < ZONE_GAUCHE:
         return "LEFT"
     elif x > ZONE_DROITE:
@@ -152,9 +150,8 @@ async def controleur_vision():
                 dessiner_zones(image)
                 commande = analyser_image(image)
 
-                # --- ENVOI DE LA COMMANDE ---
+                # ── ENVOI DE LA COMMANDE  ──────────────────────
                 # On envoie la commande dès qu'elle existe pour un mouvement fluide.
-                # Contrairement à avant, on ne filtre plus si c'est la même que la précédente.
                 if commande:
                     await connexion.send(commande)
 

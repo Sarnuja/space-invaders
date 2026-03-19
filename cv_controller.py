@@ -1,5 +1,5 @@
 # /// script
-# dependencies = ["websockets", "opencv-python", "numpy"]
+# dependencies = ["websockets", "opencv-python"]
 # ///
 
 import asyncio
@@ -10,12 +10,11 @@ import websockets
 ADRESSE_SERVEUR = "ws://localhost:8765"
 
 # ── Plage de couleur verte en espace HSV ──────────────────────
-# On baisse un peu la saturation minimale (50 au lieu de 100) pour mieux détecter
-VERT_MIN = np.array([35, 50, 50])
+VERT_MIN = np.array([35, 100, 100])
 VERT_MAX = np.array([85, 255, 255])
 
-# Taille minimale de l'objet détecté (évite les petits points de bruit)
-TAILLE_MIN = 500  
+# Taille minimale de l'objet détecté (évite les faux positifs)
+TAILLE_MIN = 500  # en pixels²
 
 # ── Zones de contrôle (en pourcentage de l'image) ─────────────
 ZONE_GAUCHE  = 0.35   # objet < 35% de la largeur  → LEFT
@@ -24,127 +23,165 @@ SEUIL_TIR    = 0.35   # objet < 35% de la hauteur  → FIRE
 SEUIL_ENTER  = 0.75   # objet > 75% de la hauteur  → ENTER
 
 
-def analyser_image(image):
-    """
-    Analyse l'image pour trouver l'objet vert et renvoyer une commande.
-    """
-    hauteur, largeur = image.shape[:2]
+def analyser_image(image) -> str | None:
+   """
+   Analyser une image et retourner une commande ou None.
 
-    # Conversion BGR → HSV
-    image_hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+   Logique :
+   - Objet vert en bas    (> 75%) → ENTER (démarrer la partie)
+   - Objet vert en haut   (< 35%) → FIRE  (tirer)
+   - Objet vert à gauche  (< 35%) → LEFT
+   - Objet vert à droite  (> 65%) → RIGHT
+   - Zone neutre / rien détecté   → None
 
-    # Masque pour isoler le vert
-    masque = cv2.inRange(image_hsv, VERT_MIN, VERT_MAX)
+   Retourne :
+       "LEFT", "RIGHT", "FIRE", "ENTER" ou None
+   """
+   hauteur, largeur = image.shape[:2]
 
-    # Nettoyage du bruit
-    masque = cv2.erode(masque, None, iterations=2)
-    masque = cv2.dilate(masque, None, iterations=2)
+   # Conversion BGR → HSV pour détecter la couleur verte
+   image_hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
 
-    # Affiche le masque pour debug (si c'est noir, l'objet n'est pas vu)
-    cv2.imshow("Masque vert (Debug)", masque)
+   # Masque : garde uniquement les pixels verts
+   masque = cv2.inRange(image_hsv, VERT_MIN, VERT_MAX)
 
-    # Trouve les contours
-    contours, _ = cv2.findContours(masque, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+   # Réduit le bruit
+   masque = cv2.erode(masque,  None, iterations=2)
+   masque = cv2.dilate(masque, None, iterations=2)
 
-    if not contours:
-        return None
+   # Affiche le masque pour calibrer la détection
+   cv2.imshow("Masque vert", masque)
 
-    # On prend le plus gros objet vert
-    plus_grand = max(contours, key=cv2.contourArea)
-    aire = cv2.contourArea(plus_grand)
+   # Trouve les contours de l'objet
+   contours, _ = cv2.findContours(masque, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    if aire < TAILLE_MIN:
-        return None
+   if not contours:
+       return None
 
-    # Calcul du centre (Moments)
-    M = cv2.moments(plus_grand)
-    if M["m00"] == 0:
-        return None
+   # Prend le plus grand contour détecté
+   plus_grand = max(contours, key=cv2.contourArea)
+   aire = cv2.contourArea(plus_grand)
 
-    cx = int(M["m10"] / M["m00"])
-    cy = int(M["m01"] / M["m00"])
+   # Ignore si trop petit (faux positif)
+   if aire < TAILLE_MIN:
+       return None
 
-    # Normalisation (0.0 à 1.0)
-    x = cx / largeur
-    y = cy / hauteur
+   # Calcule le centroïde (centre de l'objet)
+   moments = cv2.moments(plus_grand)
+   if moments["m00"] == 0:
+       return None
 
-    # Dessin sur l'image pour voir ce qui se passe
-    cv2.drawContours(image, [plus_grand], -1, (0, 255, 0), 2)
-    cv2.circle(image, (cx, cy), 8, (0, 0, 255), -1)
+   cx = int(moments["m10"] / moments["m00"])
+   cy = int(moments["m01"] / moments["m00"])
 
-    # Logique de commande
-    if y > SEUIL_ENTER:
-        return "ENTER"
-    if y < SEUIL_TIR:
-        return "FIRE"
-    if x < ZONE_GAUCHE:
-        return "LEFT"
-    if x > ZONE_DROITE:
-        return "RIGHT"
+   # Normalise entre 0.0 et 1.0
+   x = cx / largeur
+   y = cy / hauteur
 
-    return None
+   # Dessine le contour et le centroïde sur l'image
+   cv2.drawContours(image, [plus_grand], -1, (0, 255, 0), 2)
+   cv2.circle(image, (cx, cy), 8, (0, 255, 0), -1)
+
+   # Priorité 1 : objet en bas → ENTER
+   if y > SEUIL_ENTER:
+       return "ENTER"
+
+   # Priorité 2 : objet en haut → FIRE
+   if y < SEUIL_TIR:
+       return "FIRE"
+
+   # Priorité 3 : position horizontale → LEFT ou RIGHT
+   if x < ZONE_GAUCHE:
+       return "LEFT"
+   elif x > ZONE_DROITE:
+       return "RIGHT"
+
+   return None
 
 
 def dessiner_zones(image):
-    """Dessine les lignes de séparation sur la vidéo."""
-    h, l = image.shape[:2]
-    x_g, x_d = int(l * ZONE_GAUCHE), int(l * ZONE_DROITE)
-    y_f, y_e = int(h * SEUIL_TIR), int(h * SEUIL_ENTER)
+   """Dessine les zones de contrôle sur l'image pour visualisation."""
+   hauteur, largeur = image.shape[:2]
+   x_gauche = int(largeur * ZONE_GAUCHE)
+   x_droite = int(largeur * ZONE_DROITE)
+   y_tir    = int(hauteur * SEUIL_TIR)
+   y_enter  = int(hauteur * SEUIL_ENTER)
 
-    cv2.line(image, (x_g, 0), (x_g, h), (255, 255, 255), 1)
-    cv2.line(image, (x_d, 0), (x_d, h), (255, 255, 255), 1)
-    cv2.line(image, (0, y_f), (l, y_f), (0, 255, 255), 1)
-    cv2.line(image, (0, y_e), (l, y_e), (0, 255, 0), 1)
+   # Lignes de séparation
+   cv2.line(image, (x_gauche, y_tir),  (x_gauche, y_enter), (255, 255, 255), 1)
+   cv2.line(image, (x_droite, y_tir),  (x_droite, y_enter), (255, 255, 255), 1)
+   cv2.line(image, (0, y_tir),         (largeur, y_tir),     (0, 200, 255),  1)
+   cv2.line(image, (0, y_enter),       (largeur, y_enter),   (0, 255, 100),  1)
+
+   # Étiquettes
+   police = cv2.FONT_HERSHEY_SIMPLEX
+   cv2.putText(image, "TIR",    (largeur // 2 - 20,   y_tir // 2 + 8),                  police, 0.8, (0, 220, 255),  2)
+   cv2.putText(image, "GAUCHE", (x_gauche // 2 - 40,  y_tir + (y_enter - y_tir) // 2),  police, 0.7, (0, 255, 0),    2)
+   cv2.putText(image, "NEUTRE", (x_gauche + 20,       y_tir + (y_enter - y_tir) // 2),  police, 0.6, (180, 180, 180),1)
+   cv2.putText(image, "DROITE", (x_droite + 20,       y_tir + (y_enter - y_tir) // 2),  police, 0.7, (0, 255, 0),    2)
+   cv2.putText(image, "ENTER",  (largeur // 2 - 30,   y_enter + (hauteur - y_enter) // 2), police, 0.8, (0, 255, 100), 2)
+
+   return image
 
 
 async def controleur_vision():
-    """Boucle principale de capture et d'envoi WebSocket."""
-    webcam = cv2.VideoCapture(0)
-    
-    # On essaye de se connecter au serveur du jeu
-    try:
-        async with websockets.connect(ADRESSE_SERVEUR) as connexion:
-            print("✅ Connecté au serveur Space Invaders !")
-            
-            while True:
-                succes, image = webcam.read()
-                if not succes:
-                    break
+   """Boucle principale : capture la webcam et envoie les commandes au jeu."""
+   webcam = cv2.VideoCapture(0)
+   webcam.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
+   webcam.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-                # Effet miroir pour que la droite soit la droite
-                image = cv2.flip(image, 1)
-                
-                # Visualisation
-                dessiner_zones(image)
-                commande = analyser_image(image)
+   async with websockets.connect(ADRESSE_SERVEUR) as connexion:
+       print("Connecté au jeu Space Invaders !")
+       print("Contrôles avec objet vert :")
+       print("  - Objet en bas    (> 75%)  → ENTER (démarrer)")
+       print("  - Objet en haut   (< 35%)  → FIRE  (tirer)")
+       print("  - Objet à gauche  (< 35%)  → LEFT")
+       print("  - Objet à droite  (> 65%)  → RIGHT")
+       print("  - Appuyer sur 'q' pour quitter\n")
 
-                # ENVOI DE LA COMMANDE
-                # On envoie la commande à chaque frame pour que le mouvement soit fluide
-                if commande:
-                    await connexion.send(commande)
-                    # On affiche dans la console pour vérifier
-                    print(f"Envoi : {commande}")
+       derniere_commande = None
 
-                # Affichage texte sur la vidéo
-                cv2.putText(image, f"Action: {commande}", (10, 30), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-                
-                cv2.imshow("CV Controller - Niveau 3", image)
+       while True:
+           succes, image = webcam.read()
+           if not succes:
+               break
 
-                # Touche 'q' pour quitter
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                    
-                # Petit délai pour laisser respirer le CPU
-                await asyncio.sleep(0.01)
+           # Miroir horizontal
+           image = cv2.flip(image, 1)
 
-    except Exception as e:
-        print(f"❌ Erreur de connexion : {e}")
-        print("Assure-toi que le jeu Space Invaders est bien lancé.")
-    
-    finally:
-        webcam.release()
-        cv2.destroyAllWindows()
+           # Dessine les zones
+           dessiner_zones(image)
+
+           # Analyse l'image
+           commande = analyser_image(image)
+
+           # Envoie la commande si elle change
+           if commande and commande != derniere_commande:
+               await connexion.send(commande)
+               print(f"Commande envoyée : {commande}")
+               derniere_commande = commande
+           elif not commande:
+               derniere_commande = None
+
+           # Affiche la commande
+           couleurs = {
+               "LEFT":  (255, 180, 0),
+               "RIGHT": (255, 180, 0),
+               "FIRE":  (0, 220, 255),
+               "ENTER": (0, 255, 100),
+           }
+           texte   = commande or "..."
+           couleur = couleurs.get(texte, (180, 180, 180))
+           cv2.putText(image, f"Commande : {texte}", (10, 35),
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.0, couleur, 2)
+
+           cv2.imshow("Contrôleur Vision - Objet Vert", image)
+           if cv2.waitKey(1) & 0xFF == ord('q'):
+               break
+
+   webcam.release()
+   cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
-    asyncio.run(controleur_vision())
+   asyncio.run(controleur_vision())
